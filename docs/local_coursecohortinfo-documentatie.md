@@ -2,7 +2,7 @@
 
 **Moodle-plugintype:** Local plugin
 **Component:** `local_coursecohortinfo`
-**Huidige versie:** 2026080301
+**Huidige versie:** 2026080405
 **Vereist:** Moodle 4.3+ (getest en in productie op Moodle 5.2.1)
 **Doel:** ondersteunt een externe LTI-toepassing (classroom-validator) met veilige, beperkte
 webservice-functies bovenop wat Moodle's kernfuncties niet (correct) aanbieden.
@@ -16,11 +16,12 @@ webservice-functies bovenop wat Moodle's kernfuncties niet (correct) aanbieden.
 3. [Installatie](#3-installatie)
 4. [Functieoverzicht](#4-functieoverzicht)
 5. [Functiereferentie](#5-functiereferentie)
-6. [Gedeelde hulpklasse: helper](#6-gedeelde-hulpklasse-helper)
-7. [Notificatiesysteem: deadlinereminder](#7-notificatiesysteem-deadlinereminder)
-8. [Gekende Moodle-eigenaardigheden die deze plugin omzeilt](#8-gekende-moodle-eigenaardigheden-die-deze-plugin-omzeilt)
-9. [Gekende beperkingen](#9-gekende-beperkingen)
-10. [Testen](#10-testen)
+6. [Trigger-/webhooksysteem](#6-trigger-webhooksysteem)
+7. [Gedeelde hulpklasse: helper](#7-gedeelde-hulpklasse-helper)
+8. [Notificatiesysteem: deadlinereminder](#8-notificatiesysteem-deadlinereminder)
+9. [Gekende Moodle-eigenaardigheden die deze plugin omzeilt](#9-gekende-moodle-eigenaardigheden-die-deze-plugin-omzeilt)
+10. [Gekende beperkingen](#10-gekende-beperkingen)
+11. [Testen](#11-testen)
 
 ---
 
@@ -38,6 +39,9 @@ betrouwbaar, of niet veilig genoeg** aanbieden:
 | Voltooiingsstatus overschrijven zonder zelf ingeschreven te zijn | Moodle's kernfunctie vereist structureel dat het aanroepende account zelf ingeschreven is in de cursus (voltooiing is gegevensmodel-matig aan een inschrijving gekoppeld). |
 | "Verwacht voltooid op" (deadline) lezen/instellen, ook als er nog geen voltooiingsvoorwaarde bestaat | Geen enkele kernfunctie legt dit veld bloot; nodig omdat leerkrachten dit bij het aanmaken van een LTI-opdracht soms vergeten in te stellen. |
 | Een leerling persoonlijk informeren (bv. individuele verlenging) | Persoonlijke kalendergebeurtenissen voor een andere gebruiker zijn sinds een beveiligingsfix (MSA-22-0002) niet meer mogelijk; `core_message_send_instant_messages` wordt geblokkeerd door de contactprivacy-instelling van de ontvanger. |
+| Naam/beschrijving/afbeeldingen van een cohort- of sectie-beperkte activiteit lezen | `mod_lti_get_ltis_by_courses` en `pluginfile.php` passen Moodle's volledige beschikbaarheidscontrole toe en weigeren/verzwijgen deze data voor een account dat niet aan de voorwaarde voldoet — ongeacht welke `viewhidden*`-capabilities dat account heeft. |
+| Een LTI-opdracht in Moodle vinden zonder via een zichtbaarheids-gevoelig pad | `core_course_get_contents` laat een hele sectie (en dus alles erin) stilzwijgend verdwijnen zodra de sectie zelf cohort-beperkt is, zonder foutmelding — het cmid is dan onvindbaar. |
+| De externe toepassing laten weten dat een activiteit gewijzigd is | Moodle heeft geen ingebouwde webhook-functionaliteit; enkel interne events. |
 
 ## 2. Architectuur en beveiligingsprincipes
 
@@ -56,26 +60,32 @@ betrouwbaar, of niet veilig genoeg** aanbieden:
 - **Eén betrouwbare "toegelaten leerlingen"-checklist, overal hergebruikt.** Elke functie die
   met individuele leerlingen werkt, berekent zelf (via de gedeelde `helper`-klasse) wie écht
   ingeschreven én tot de activiteit toegelaten is — nooit gebaseerd op wat de aanroeper zelf
-  meegeeft. Dit voorkwam een reëel probleem: `completion_info::update_state()` accepteerde
-  aanvankelijk blindelings elke userid (ook onbestaande), zonder foutmelding.
+  meegeeft.
 - **Geparametriseerde SQL overal**, geen ruwe stringconcatenatie van gebruikersinvoer.
-- **Hergebruik van Moodle's eigen bedrijfslogica waar mogelijk.** Bijvoorbeeld:
-  `override_completion_status` roept dezelfde `completion_info::update_state()`-methode aan
-  die Moodle's eigen kernfunctie ook gebruikt (dus dezelfde events, cache-invalidatie en
-  cursusvoltooiing-herberekening) — enkel de contextvalidatie is aangepast, niet de
-  onderliggende logica.
+- **Hergebruik van Moodle's eigen bedrijfslogica waar mogelijk**, enkel de contextvalidatie
+  aangepast, niet de onderliggende logica (bv. `override_completion_status`).
+- **Achtergrondtaken nooit synchroon met een leerkrachtenactie.** De webhook-aanroep (zie
+  hoofdstuk 6) gebeurt nooit tijdens het opslaan van een activiteit zelf — enkel een lichte
+  taak wordt in de wachtrij gezet, zodat een trage/onbereikbare externe server het opslaan
+  nooit vertraagt of laat mislukken.
+- **Rauwe opslaglagen (bestanden) bewust ingezet om zichtbaarheidscontroles te omzeilen waar
+  dat gerechtvaardigd is.** `get_activity_description` gebruikt `get_file_storage()` in plaats
+  van `pluginfile.php`, net omdat die laag per ontwerp geen beschikbaarheidscontrole toepast —
+  zie hoofdstuk 5.10 en 9.9.
 
 ## 3. Installatie
 
-Zie de aparte handleiding (`Moodle-Entra-documentatie.md`, hoofdstuk 12) voor de volledige
-stap-voor-stap procedure (uitpakken, back-up van de oude map, verplaatsen, rechten,
-Sitebeheer-upgrade). Kernpunten:
+Zie `README.md` in de hoofdmap van deze repo voor de volledige stap-voor-stap procedure
+(uitpakken, back-up van de oude map, verplaatsen, rechten, Sitebeheer-upgrade). Kernpunten:
 
 1. Plaats de map op `<moodle>/local/coursecohortinfo/`, eigenaar `www-data:www-data`.
 2. Bevestig de upgrade in Sitebeheer.
 3. Voeg elke gewenste functie toe aan de juiste service (lees- of write-service — zie
    tabel in hoofdstuk 4).
 4. Ken de bijhorende capability toe aan de juiste rol.
+5. **Nieuw sinds de trigger-functionaliteit:** vul, indien gewenst, de webhook-instellingen in
+   via **Sitebeheer > Plugins > Local plugins > Cursus-cohort inschrijvingsinfo** — zie
+   hoofdstuk 6.
 
 ## 4. Functieoverzicht
 
@@ -83,9 +93,11 @@ Sitebeheer-upgrade). Kernpunten:
 |---|---|---|---|
 | `local_coursecohortinfo_get_course_cohort_enrolments` | read | lees | `local/coursecohortinfo:view` |
 | `local_coursecohortinfo_get_available_users` | read | lees | `local/coursecohortinfo:view` |
+| `local_coursecohortinfo_get_available_users_for_instance` | read | lees | `local/coursecohortinfo:view` |
 | `local_coursecohortinfo_get_courses_using_lti_type` | read | lees | `local/coursecohortinfo:view` |
 | `local_coursecohortinfo_get_completion_status_bulk` | read | lees | `local/coursecohortinfo:view` |
 | `local_coursecohortinfo_get_completion_settings` | read | lees | `local/coursecohortinfo:view` |
+| `local_coursecohortinfo_get_activity_description` | read | lees | `local/coursecohortinfo:view` |
 | `local_coursecohortinfo_override_completion_status` | write | write | `local/coursecohortinfo:overridecompletion` |
 | `local_coursecohortinfo_override_completion_status_bulk` | write | write | `local/coursecohortinfo:overridecompletion` |
 | `local_coursecohortinfo_set_completion_settings` | write | write | `moodle/course:manageactivities` |
@@ -109,14 +121,45 @@ Geeft de effectieve lijst ingeschreven **leerlingen** (leerkrachten uitgesloten)
 specifieke activiteit mogen zien, plus de betrokken groepen/cohorten (met naam).
 
 **Kernmethode:** per leerling apart `get_fast_modinfo($course, $userid)->get_cm($cmid)->uservisible`
-— bewust **niet** de snellere bulkmethode `filter_user_list()` (zie hoofdstuk 8.3).
+— bewust **niet** de snellere bulkmethode `filter_user_list()` (zie hoofdstuk 9.3).
 
 **Parameters:** `cmid` (int)
 
 **Returns:** `{cmid, totalenrolled, totalvisible, users: [{id, fullname, email}], groups:
 [{id, name}], cohorts: [{id, name, idnumber}]}`
 
-### 5.3 `get_courses_using_lti_type(ltitypeid)`
+### 5.3 `get_available_users_for_instance(courseid, instance)`
+
+Zelfde doel en resultaatvorm als `get_available_users`, maar neemt `(courseid, instance)` in
+plaats van `cmid` — `instance` is het `mod_lti`-instance-ID, **niet** het cmid.
+
+**Waarom deze functie nodig was, naast `get_available_users`:** het cmid van een LTI-opdracht
+werd door de aanroepende toepassing opgezocht via `core_course_get_contents`. Zodra de
+**sectie** waarin de activiteit zit cohort-beperkt is (niet de activiteit zelf), laat die
+kernfunctie de hele sectie — en dus het cmid — stilzwijgend verdwijnen uit de respons voor een
+account dat niet aan de voorwaarde voldoet. Het cmid was dan onvindbaar, en de aanroepende
+toepassing viel terug op een fail-safe ("geen beperking toepassen") — precies de situatie die
+deze functie voorkomt.
+
+**Hoe:** het cmid wordt opgezocht via een **rechtstreekse databank-join**
+(`{course_modules}` ⋈ `{modules}` op `module`/`instance`/`course`), een pad dat nooit door
+zichtbaarheid van het aanroepende account beïnvloed wordt. Nadien wordt exact dezelfde,
+al beveiligde `helper::get_allowed_students()` gebruikt als in `get_available_users`.
+
+**Belangrijke aanname:** enkel activiteiten van moduletype **`lti`** worden opgezocht —
+instance-ID's zijn enkel uniek *binnen* de tabel van één moduletype.
+
+**Parameters:** `courseid` (int), `instance` (int)
+
+**Returns:** zelfde vorm als `get_available_users`, plus het opgezochte `cmid`. Geeft een
+duidelijke `invalidrecordunknown`-fout als er geen `lti`-activiteit met dat instance-ID in die
+cursus bestaat (i.p.v. stil "geen beperking" te suggereren).
+
+**Wat bewust *niet* is overgenomen uit het oorspronkelijke verzoek van het app-team:** de
+specificatie stelde voor om `\core_availability\info_module::filter_user_list()` (de
+bulkmethode) te gebruiken. Dat zou een regressie zijn geweest — zie hoofdstuk 9.3 voor waarom.
+
+### 5.4 `get_courses_using_lti_type(ltitypeid)`
 
 Geeft de cursussen terug die minstens één activiteit van een specifiek, geregistreerd
 LTI-tooltype (`mdl_lti_types.id`) bevatten. Voorkomt dat een client-tool alle cursussen op de
@@ -126,7 +169,7 @@ site moet doorzoeken.
 
 **Returns:** lijst van `{courseid, coursename}`
 
-### 5.4 `get_completion_status_bulk(cmid)`
+### 5.5 `get_completion_status_bulk(cmid)`
 
 Geeft de voltooiingsstatus van **alle** toegelaten leerlingen voor een activiteit terug in
 één aanroep, in plaats van N aparte aanroepen met `core_completion_get_activities_completion_status`.
@@ -136,7 +179,7 @@ Geeft de voltooiingsstatus van **alle** toegelaten leerlingen voor een activitei
 **Returns:** `{cmid, completionenabled, users: [{userid, fullname, email, state,
 timecompleted, overrideby}], checklist: [userid, ...]}`
 
-### 5.5 `get_completion_settings(cmid)`
+### 5.6 `get_completion_settings(cmid)`
 
 Geeft de "Voltooiingsvoorwaarden"-instellingen van een activiteit terug, inclusief of een
 "Verwacht voltooid op"-datum ontbreekt — bruikbaar om te detecteren of dit bij het aanmaken
@@ -151,7 +194,7 @@ completionexpected, hasexpecteddate, completionpassgrade, likelyforgottendeadlin
 `completionmode` (ook als voltooiing volgen zelf nog op 0/uit staat — net het duidelijkste
 "vergeten"-geval).
 
-### 5.6 `override_completion_status(userid, cmid, newstate)`
+### 5.7 `override_completion_status(userid, cmid, newstate)`
 
 Overschrijft de voltooiingsstatus van één leerling. Weigert expliciet (foutmelding) als de
 opgegeven userid niet in de betrouwbare toegelaten-lijst voorkomt.
@@ -161,7 +204,7 @@ opgegeven userid niet in de betrouwbare toegelaten-lijst voorkomt.
 
 **Returns:** `{cmid, userid, state, timecompleted, overrideby, checklist: [userid, ...]}`
 
-### 5.7 `override_completion_status_bulk(cmid, newstate, userids)`
+### 5.8 `override_completion_status_bulk(cmid, newstate, userids)`
 
 Zelfde als hierboven, voor meerdere leerlingen in één aanroep. Een individuele mislukking (bv.
 ongeldige userid) blokkeert de rest van de batch niet — elk resultaat wordt apart
@@ -171,7 +214,7 @@ gerapporteerd.
 
 **Returns:** `{cmid, results: [{userid, success, state, error}], checklist: [userid, ...]}`
 
-### 5.8 `set_completion_settings(cmid, completionmode, completionexpected)`
+### 5.9 `set_completion_settings(cmid, completionmode, completionexpected)`
 
 Stelt de voltooiingsmodus en/of de "Verwacht voltooid op"-datum in, samen of apart. Gebruik
 `-1` voor een parameter om die ongewijzigd te laten.
@@ -179,7 +222,7 @@ Stelt de voltooiingsmodus en/of de "Verwacht voltooid op"-datum in, samen of apa
 Roept, naast het wegschrijven van de databankvelden, ook expliciet
 `\core_completion\api::update_completion_date_event()` aan — dit is de stap die de
 kalender-actiegebeurtenis (Tijdlijn-weergave) effectief aanmaakt/bijwerkt; een rechtstreekse
-databankwijziging alleen doet dit niet (zie hoofdstuk 8.5).
+databankwijziging alleen doet dit niet (zie hoofdstuk 9.5).
 
 **Bescherming:** als de uiteindelijke `completionmode` op 0 (uit) uitkomt, wordt
 `completionexpected` altijd naar 0 geforceerd, ongeacht wat werd meegegeven — voorkomt de
@@ -193,7 +236,42 @@ default -1)
 **Vereist:** "Voltooiing volgen" moet aanstaan op **cursusniveau**, anders weigert de functie
 met een duidelijke foutmelding.
 
-### 5.9 `send_deadline_notification(cmid, userid, subject, message)`
+### 5.10 `get_activity_description(cmid)`
+
+Geeft naam en beschrijving (HTML + platte tekst) van een activiteit terug, samen met alle
+daarin ingesloten afbeeldingen (als base64).
+
+**Waarom deze functie bestaat:** kernfuncties zoals `mod_lti_get_ltis_by_courses` (voor de
+tekst) en `pluginfile.php` (voor ingesloten afbeeldingen) passen Moodle's volledige
+beschikbaarheidscontrole toe, inclusief cohort-voorwaarden. Bevestigd: voor een
+cohort-beperkte activiteit gaf `mod_lti_get_ltis_by_courses` stilzwijgend een lege lijst terug
+(geen onderscheid tussen "bestaat niet" en "mag niet gezien worden"), en `pluginfile.php`
+weigerde de afbeelding met een `requireloginerror` — ongeacht welke `viewhidden*`-capabilities
+het aanroepende account had.
+
+**Hoe dit structureel omzeild wordt, niet via een capability:** de tekst wordt rechtstreeks
+via een databankquery opgehaald (geen availability-check ooit aangeroepen), en de
+afbeeldingen via `get_file_storage()` — Moodle's rauwe bestandsopslag-laag, die per ontwerp
+**geen** zichtbaarheids-/beschikbaarheidscontrole uitvoert (dat gebeurt pas bij het renderen
+van een pagina, niet bij het opslaan/ophalen van bestanden zelf).
+
+**Bekende, opgeloste bug:** het `component`-argument voor `get_file_storage()->get_area_files()`
+moet het **frankenstyle-formaat** zijn (`"mod_lti"`), niet enkel de moduletype-naam
+(`"lti"`) — bij een verkeerd component geeft `get_area_files()` stilzwijgend een lege array
+terug, geen foutmelding. Zie hoofdstuk 9.9.
+
+**Vangnet:** maximaal 8 MB aan bestanden per aanroep; grotere bijlagen worden overgeslagen
+(`filestruncated: true` signaleert dat).
+
+**Parameters:** `cmid` (int)
+
+**Returns:** `{cmid, name, description, descriptionformat, descriptionplaintext, files:
+[{filename, mimetype, filesize, base64}], filestruncated}`
+
+`description` bevat de ruwe `@@PLUGINFILE@@`-tokens, niet vervangen — de aanroepende
+toepassing koppelt die aan de bijhorende bestanden in `files` op basis van bestandsnaam.
+
+### 5.11 `send_deadline_notification(cmid, userid, subject, message)`
 
 Stuurt een persoonlijke **systeemnotificatie** (geen instant message) naar één specifieke,
 toegelaten leerling — bv. voor een individuele verlenging. Gebruikt `notification = 1`, wat
@@ -205,10 +283,124 @@ tekst)
 
 **Returns:** `{success, error, checklist: [userid, ...]}`
 
-E-mail is voor dit berichttype site-breed uitgeschakeld (zie hoofdstuk 7) — enkel de
+E-mail is voor dit berichttype site-breed uitgeschakeld (zie hoofdstuk 8) — enkel de
 schermmelding (popup/berichten-icoon) wordt gebruikt.
 
-## 6. Gedeelde hulpklasse: helper
+## 6. Trigger-/webhooksysteem
+
+Los van de aanroepbare webservice-functies hierboven, kan de plugin ook **zelf initiatief
+nemen**: bij elke wijziging aan een gevolgde activiteit (standaard: elke LTI-opdracht) stuurt
+Moodle automatisch een melding naar een extern endpoint, zodat de externe toepassing niet
+periodiek zelf hoeft te pollen.
+
+### 6.1 Architectuur
+
+```
+Leerkracht bewaart activiteit
+        |
+        v
+Moodle vuurt \core\event\course_module_updated af
+        |
+        v
+classes/observer.php - filtert op moduletype (instelling "Gevolgde moduletypes"),
+                        zet bij een match enkel een LICHTE taak in de wachtrij
+        |               (GEEN synchrone HTTP-aanroep - zie hieronder waarom)
+        v
+classes/task/send_webhook.php (ad-hoc taak, via cron)
+        |
+        +- haalt naam + beschrijving + platte tekst actueel op (op uitvoeringsmoment,
+        |  niet op opslagmoment) via de generieke intro/introformat-velden
+        +- ondertekent de payload (HMAC-SHA256) met het gedeelde geheim
+        +- stuurt HTTP POST naar de geconfigureerde webhook-URL
+```
+
+**Waarom de HTTP-aanroep nooit synchroon gebeurt:** als de webhook-aanroep tijdens het
+opslaan zelf zou gebeuren, zou een trage of tijdelijk onbereikbare externe server het opslaan
+voor de leerkracht vertragen of zelfs laten mislukken. De observer zet daarom enkel een lichte
+ad-hoc taak in de wachtrij (een databank-insert); de effectieve HTTP-aanroep gebeurt apart via
+cron. Mislukt die aanroep, dan gooit `send_webhook::execute()` bewust een uitzondering, zodat
+Moodle's eigen taaksysteem automatisch herprobeert (met oplopende vertraging) in plaats van de
+mislukking stil te negeren.
+
+### 6.2 Belangrijke beperking van het brontype-event
+
+`\core\event\course_module_updated` vuurt bij **elke** wijziging aan de
+activiteitinstellingen (naam, beschrijving, data, ...), niet specifiek enkel bij een
+beschrijvingswijziging — Moodle's event bevat geen "welk veld precies gewijzigd is"-detail.
+De ontvangende toepassing moet zelf vergelijken met de vorige, gekende waarde om te bepalen of
+het effectief de beschrijving was.
+
+### 6.3 Beheerscherm
+
+**Sitebeheer > Plugins > Local plugins > Cursus-cohort inschrijvingsinfo**
+
+| Instelling | Config-sleutel | Standaardwaarde | Betekenis |
+|---|---|---|---|
+| Webhook-URL | `webhookurl` | leeg | Zonder waarde is de webhook volledig uitgeschakeld — veilig om te installeren vóór het backend-endpoint klaarstaat. |
+| Geheime ondertekeningssleutel | `webhooksecret` | leeg | HMAC-SHA256-sleutel, gedeeld met het ontvangende endpoint. Zonder waarde wordt de payload onondertekend verstuurd (niet aangeraden). |
+| Gevolgde moduletypes | `webhookmodules` | `lti` | Kommagescheiden lijst; enkel activiteiten van deze types triggeren de webhook. |
+
+### 6.4 Payload-vorm
+
+```json
+{
+  "event": "\\core\\event\\course_module_updated",
+  "cmid": 391,
+  "courseid": 7,
+  "modname": "lti",
+  "userid": 8,
+  "timecreated": 1785675761,
+  "name": "Documenten delen",
+  "description": "<p>...@@PLUGINFILE@@/afbeelding.png...</p>",
+  "descriptionformat": 1,
+  "descriptionplaintext": "..."
+}
+```
+
+Naam/beschrijving worden **best effort** toegevoegd (fout hierbij blokkeert nooit de rest van
+de webhook) en generiek opgehaald via de standaard `intro`/`introformat`-velden — werkt dus
+ook als "Gevolgde moduletypes" ooit wordt uitgebreid met andere activiteittypes dan `lti`.
+**Let op:** deze payload bevat geen ingesloten afbeeldingen (in tegenstelling tot
+`get_activity_description`) — de ontvangende toepassing roept die functie apart aan indien
+nodig.
+
+### 6.5 Verificatie aan ontvangstzijde
+
+Elke aanroep bevat een `X-Moodle-Signature: sha256=<hmac>`-header
+(`hash_hmac('sha256', $payload, $secret)`), enkel aanwezig als een geheime sleutel is
+ingesteld. Het ontvangende endpoint moet dezelfde berekening uitvoeren op de ruwe request-body
+en tijdsveilig vergelijken.
+
+### 6.6 Operationeel: het gedeelde geheim hoort niet enkel lokaal
+
+Voor een gedeployde ontvanger (bv. een Cloud Run-service) mag het gedeelde geheim **niet**
+enkel in een lokaal `.env`-bestand staan — dat wordt nooit meegenomen naar de gedeployde
+omgeving. Gebruik een secretbeheerdienst (bv. Google Secret Manager) en koppel die aan de
+gedeployde service als omgevingsvariabele, zodat het geheim beschikbaar blijft ongeacht of een
+ontwikkelaars-PC aanstaat. Concreet, voor Google Cloud Run:
+
+```bash
+# 1. Geheim aanmaken (gebruik dezelfde waarde als in Moodle's "Geheime ondertekeningssleutel")
+printf "DE-EXACTE-SLEUTEL-UIT-MOODLE" | gcloud secrets create webhook-secret --data-file=-
+
+# 2. Toegang geven aan het service-account van de Cloud Run-dienst
+gcloud secrets add-iam-policy-binding webhook-secret \
+  --member="serviceAccount:JOUW-SERVICE-ACCOUNT@JOUW-PROJECT.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+
+# 3. Koppelen aan de service als omgevingsvariabele
+gcloud run services update JOUW-SERVICE-NAAM \
+  --update-secrets=WEBHOOK_SECRET=webhook-secret:latest \
+  --region=europe-west1
+```
+
+**Symptoom bij een verkeerd/ontbrekend secret aan ontvangstzijde:** de Moodle-cronlog toont
+`Adhoc task failed: local_coursecohortinfo\task\send_webhook ... HTTP 401`, met de foutmelding
+die het ontvangende endpoint zelf teruggeeft (bv. `"Ongeldig of ontbrekend secret"`) — dit is
+dus een fout aan de **ontvangstkant**, niet in deze plugin, zolang de sleutel in Moodle zelf
+correct is ingevuld.
+
+## 7. Gedeelde hulpklasse: helper
 
 `classes/local/helper.php` — herbruikt door alle functies die met individuele leerlingen
 werken.
@@ -218,16 +410,19 @@ werken.
   (archetype-gebaseerd: `editingteacher`, `teacher` — hernoemingsbestendig).
 - **`get_allowed_students($course, int $cmid, array $enrolledusers): array`** — filtert tot
   enkel wie de activiteit effectief mag zien, via de per-gebruiker `uservisible`-berekening
-  (zie hoofdstuk 8.3 voor waarom dit niet via de snellere bulkmethode gebeurt).
+  (zie hoofdstuk 9.3 voor waarom dit niet via de snellere bulkmethode gebeurt).
+- **`extract_groups_and_cohorts(?string $availabilityjson): array`** — parseert de ruwe
+  Toegang beperken-JSON en zoekt de genoemde groepen/cohorten met naam op. Gedeeld tussen
+  `get_available_users` en `get_available_users_for_instance` (voorheen gedupliceerde code).
 
-## 7. Notificatiesysteem: deadlinereminder
+## 8. Notificatiesysteem: deadlinereminder
 
 `db/messages.php` registreert een eigen berichttype (`deadlinereminder`), gebruikt door
 `send_deadline_notification`.
 
 - **Geen `capability`-sleutel** — zichtbaar/ontvangbaar voor alle gebruikers.
 - **`'popup' => MESSAGE_PERMITTED + MESSAGE_DEFAULT_ENABLED`** — standaard aan, leerling kan
-  het zelf uitzetten. (Zie hoofdstuk 8.6 voor de juiste constante — `MESSAGE_DEFAULT_LOGGEDIN`/
+  het zelf uitzetten. (Zie hoofdstuk 9.6 voor de juiste constante — `MESSAGE_DEFAULT_LOGGEDIN`/
   `MESSAGE_DEFAULT_LOGGEDOFF` zijn in recente Moodle-versies volledig verwijderd.)
 - **`'email' => MESSAGE_DISALLOWED`** — bewust uitgeschakeld, zolang er geen SMTP is
   ingesteld op deze omgeving (voorkomt mislukte verzendpogingen).
@@ -240,12 +435,12 @@ Berichten > Instellingen meldingen > Standaard berichtenvoorkeuren**.
 Om dit te **verplichten** (leerling kan niet uitzetten): vervang `MESSAGE_PERMITTED +
 MESSAGE_DEFAULT_ENABLED` door `MESSAGE_FORCED`, en herbevestig via hetzelfde beheerscherm.
 
-## 8. Gekende Moodle-eigenaardigheden die deze plugin omzeilt
+## 9. Gekende Moodle-eigenaardigheden die deze plugin omzeilt
 
 Dit hoofdstuk documenteert *waarom* de code bepaalde dingen doet zoals ze doet — waardevol bij
 toekomstig onderhoud of een Moodle-upgrade.
 
-### 8.1 Modulecontext-validatie vereist eigen inschrijving
+### 9.1 Modulecontext-validatie vereist eigen inschrijving
 
 `self::validate_context()` tegen een **modulecontext** triggert intern een
 `require_login()`-achtige controle die vereist dat het aanroepende account zelf aan de
@@ -253,7 +448,7 @@ Toegang beperken-voorwaarden van die activiteit voldoet. Voor een rapporterend/s
 service-account is dat net omgekeerd van wat nodig is. **Oplossing:** overal valideren tegen
 de **cursuscontext**.
 
-### 8.2 `moodle/course:view` geeft geen echte deelname
+### 9.2 `moodle/course:view` geeft geen echte deelname
 
 Bevestigd in Moodle's eigen documentatie: een account met enkel `moodle/course:view` kan een
 cursus bekijken zonder ingeschreven te zijn, maar kan **niet** echt deelnemen — niet
@@ -267,16 +462,24 @@ waar het moet kunnen schrijven. Aanbevolen aanpak: een dedicated, puur-lokale Mo
 Sitegroepsynchronisatie-inschrijvingsmethode (met een lege, onschadelijke rol) aan elke cursus
 die de LTI-tool gebruikt.
 
-### 8.3 `filter_user_list()` filtert niet alle voorwaarde-types
+### 9.3 `filter_user_list()` filtert niet alle voorwaarde-types
 
 Moodle's bulkmethode `\core_availability\info_module::filter_user_list()` past een
 voorwaarde enkel toe als de betrokken availability-plugin `is_applied_to_user_lists()`
-expliciet implementeert. Bevestigd: `availability_cohort` doet dit niet — cohort-gebaseerde
-beperkingen werden bij bulkfiltering genegeerd (iedereen leek "zichtbaar"). **Oplossing:**
-per-gebruiker `get_fast_modinfo($course, $userid)->uservisible`, trager bij grote cursussen
-maar altijd correct, ongeacht voorwaarde-type of EN/OF/NIET-combinatie.
+expliciet implementeert. Bevestigd, twee keer onafhankelijk in de Moodle-broncode
+(`availability/classes/info_module.php`): `availability_cohort` doet dit niet —
+cohort-gebaseerde beperkingen werden bij bulkfiltering genegeerd (iedereen leek "zichtbaar").
 
-### 8.4 Ghost-records bij een onbestaande userid
+**Oplossing, en waarom die betrouwbaar is:** per-gebruiker
+`get_fast_modinfo($course, $userid)->uservisible`. Moodle's eigen ontwikkelaarsdocumentatie
+bevestigt dit expliciet als de aanbevolen aanpak voor het controleren van één specifieke,
+gekende gebruiker ("gebruik `get_fast_modinfo` om een cm_info-object te krijgen, controleer
+gewoon `$cm->uservisible`"), en de broncode van `info_module::is_user_visible()` bevestigt dat
+`uservisible` daarbij automatisch de sectiebeperking combineert met die van de module zelf.
+Trager dan `filter_user_list()` bij grote cursussen, maar altijd correct, ongeacht
+voorwaarde-type of EN/OF/NIET-combinatie.
+
+### 9.4 Ghost-records bij een onbestaande userid
 
 `completion_info::update_state()` accepteerde aanvankelijk blindelings elke userid, ook
 niet-bestaande (999999, -1, ...) — geen foreign-key-afdwinging op die kolom, dus geen fout,
@@ -284,7 +487,7 @@ gewoon een stil "geslaagd" record. **Oplossing:** elke schrijffunctie valideert 
 eerst tegen de betrouwbare `helper::get_allowed_students()`-lijst, vóór er iets geschreven
 wordt.
 
-### 8.5 `completionexpected` alleen aanpassen toont niets in de Tijdlijn
+### 9.5 `completionexpected` alleen aanpassen toont niets in de Tijdlijn
 
 Het rechtstreeks wijzigen van `course_modules.completionexpected` past enkel het ruwe veld
 aan. De kalender-actiegebeurtenis die het Tijdlijn-blok/Dashboard effectief leest, is een
@@ -292,7 +495,7 @@ aan. De kalender-actiegebeurtenis die het Tijdlijn-blok/Dashboard effectief lees
 — exact de aanroep die Moodle's eigen bewerkingsformulier na het opslaan doet.
 `set_completion_settings` roept dit nu ook expliciet aan.
 
-### 8.6 `MESSAGE_DEFAULT_LOGGEDIN`/`MESSAGE_DEFAULT_LOGGEDOFF` zijn verwijderd
+### 9.6 `MESSAGE_DEFAULT_LOGGEDIN`/`MESSAGE_DEFAULT_LOGGEDOFF` zijn verwijderd
 
 Oudere Moodle-documentatie en pluginvoorbeelden gebruiken deze twee constanten in
 `db/messages.php`. In recente Moodle-versies (rond 4.5+) zijn ze **volledig verwijderd**
@@ -300,7 +503,7 @@ Oudere Moodle-documentatie en pluginvoorbeelden gebruiken deze twee constanten i
 Een poging om de oude constanten te gebruiken geeft een harde `Undefined constant`-crash bij
 de plugin-upgrade.
 
-### 8.7 `core_calendar_create_calendar_events` ondersteunt geen persoonlijke gebeurtenis voor een andere gebruiker
+### 9.7 `core_calendar_create_calendar_events` ondersteunt geen persoonlijke gebeurtenis voor een andere gebruiker
 
 Getest en bevestigd: het `eventtype: 'user'` accepteert geen `userid`-parameter voor een
 andere gebruiker dan de aanroeper zelf (`invalidparameter`-fout: "Unexpected keys (userid)").
@@ -308,9 +511,9 @@ Dit sluit aan bij een eerdere, gerichte beveiligingsfix (MSA-22-0002) die `moodl
 manageentries` al beperkte tot Site/Categorie/Cursus-context, niet Gebruikerscontext. Er
 bestaat dus geen ondersteunde manier om via webservice een gebeurtenis in de persoonlijke
 kalender van een specifieke, andere leerling te plaatsen — vandaar de keuze voor
-systeemnotificaties (hoofdstuk 7) in plaats van kalendergebeurtenissen voor dit doel.
+systeemnotificaties (hoofdstuk 8) in plaats van kalendergebeurtenissen voor dit doel.
 
-### 8.8 `core_message_send_instant_messages` wordt geblokkeerd door contactprivacy
+### 9.8 `core_message_send_instant_messages` wordt geblokkeerd door contactprivacy
 
 Een gewoon persoonlijk bericht (in tegenstelling tot een systeemnotificatie) wordt geweigerd
 als de ontvanger zijn privacy-instelling op "enkel contacten" heeft staan en de afzender geen
@@ -318,32 +521,49 @@ contact is. **Oplossing:** een systeemnotificatie (`notification = 1` op een
 `\core\message\message`-object, via een eigen geregistreerde berichtprovider) omzeilt deze
 check, net als elke kern-Moodle-notificatie.
 
-### 8.9 `core/modal_factory` is volledig verwijderd in Moodle 5.2
+### 9.9 Bestandsopslag-component moet het frankenstyle-formaat zijn
+
+`get_file_storage()->get_area_files()` verwacht als `component`-argument het volledige
+frankenstyle-formaat (`"mod_lti"`), niet enkel de moduletype-naam (`"lti"`). Bij een verkeerd
+component geeft de functie stilzwijgend een **lege array** terug — geen foutmelding, waardoor
+dit initieel niet opviel toen enkel de tekst (via een aparte, rechtstreekse databankquery) wél
+correct doorkwam. Bevestigd en opgelost in `get_activity_description`.
+
+### 9.10 `core/modal_factory` is volledig verwijderd in Moodle 5.2
 
 Niet gerelateerd aan deze plugin, maar relevant voor deze omgeving: de "Tiles" (Tegel)
-cursusformaat-plugin (versie 5.1.0.2) roept nog `core/modal_factory` aan, wat in Moodle 5.2
+cursusformaat-plugin (versie 5.1.0.2) riep nog `core/modal_factory` aan, wat in Moodle 5.2
 volledig verwijderd is (niet enkel verouderd). Dit veroorzaakte een JavaScript-crash die
 willekeurige, ongerelateerde front-end-functionaliteit (o.a. het meldingen-belletje) kon
 blokkeren. **Workaround:** de "Modal activiteiten"/"Modal resources"-instellingen van de
 Tiles-plugin uitschakelen tot er een 5.2-compatibele release is.
 
-## 9. Gekende beperkingen
+## 10. Gekende beperkingen
 
-- **Geen persoonlijke kalendergebeurtenissen** voor individuele leerlingen mogelijk (zie 8.7)
+- **Geen persoonlijke kalendergebeurtenissen** voor individuele leerlingen mogelijk (zie 9.7)
   — systeemnotificaties zijn het ondersteunde alternatief.
 - **`get_available_users`/`get_completion_status_bulk` zijn traag bij zeer grote cursussen**
-  (honderden leerlingen), door het per-gebruiker berekeningsmodel (zie 8.3). Voor normale
+  (honderden leerlingen), door het per-gebruiker berekeningsmodel (zie 9.3). Voor normale
   klasgroottes ruimschoots snel genoeg.
 - **Write-service-account moet ingeschreven zijn in elke cursus** waar
-  `override_completion_status(_bulk)` gebruikt wordt (zie 8.2) — vereist het opzetten van de
+  `override_completion_status(_bulk)` gebruikt wordt (zie 9.2) — vereist het opzetten van de
   dedicated-sitegroep-aanpak per nieuwe cursus.
+- **`get_activity_description` heeft een vangnet van 8 MB** aan totale bestandsgrootte per
+  aanroep; grotere bijlagen worden overgeslagen (`filestruncated: true`).
+- **De webhook garandeert geen exacte "wat is er gewijzigd"-informatie** (zie 6.2) — enkel
+  *dat* er iets gewijzigd is aan een gevolgde activiteit.
 - **Interne Moodle-API's, geen gegarandeerd stabiel extern contract.** `get_fast_modinfo()`,
-  `\core_availability\info_module`, `\core_completion\api` zijn interne PHP-API's, geen
-  officiële webservice-contracten. Test na elke grote Moodle-versie-upgrade opnieuw (zie
-  hoofdstuk 10).
+  `\core_availability\info_module`, `\core_completion\api`, `get_file_storage()` zijn interne
+  PHP-API's, geen officiële webservice-contracten. Test na elke grote Moodle-versie-upgrade
+  opnieuw (zie hoofdstuk 11).
 
-## 10. Testen
+## 11. Testen
 
-Gebruik `test_lti_deelnemers.js` (apart script, zie eigen documentatie in dat bestand) na elke
-Moodle-upgrade als regressietest: cursus/LTI-activiteit opzoeken, deelnemerslijst + cohorten
-tonen, ruwe respons desgewenst inspecteren (`:raw`-achtervoegsel).
+Gebruik `test_lti_deelnemers.js` (apart script) na elke Moodle-upgrade als regressietest:
+cursus/LTI-activiteit opzoeken, deelnemerslijst + cohorten tonen, ruwe respons desgewenst
+inspecteren (`:raw`-achtervoegsel).
+
+Controleer bij elke Moodle-cronrun ook het logboek op mislukte `send_webhook`-taken
+(**Sitebeheer > Server > Geplande taken** of rechtstreeks de cron-output) — die falen
+zichtbaar met een HTTP-statuscode en het antwoord van het ontvangende endpoint, zie
+hoofdstuk 6.6.
